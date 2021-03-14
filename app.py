@@ -1,6 +1,9 @@
+import os
 import sys
 
 from src.crawler import crawl
+
+output_directory = './results/'
 
 if __name__ == "__main__":
   initial_targets = []
@@ -17,7 +20,15 @@ if __name__ == "__main__":
 
   print("Targeting the following URL's:")
   for target in initial_targets:
-    print(target)
+    print('    - {}'.format(target))
 
-  exit(0)
-  crawl(initial_target)
+  if not os.path.exists(output_directory):
+    os.makedirs(output_directory)
+
+  for target in initial_targets:
+    parsed_target = target.replace('/', '_')
+    result_file_path = output_directory + parsed_target + '.csv'
+    if not os.path.exists(result_file_path):
+      with open(result_file_path, 'w') as result_file:
+        result_file.write('Title,URL\n')
+    crawl(target, result_file_path)

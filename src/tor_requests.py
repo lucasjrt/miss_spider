@@ -28,5 +28,5 @@ def new_tor_id():
 
 def tor_get(url: str):
     new_tor_id()
-    response = requests.get(url, headers=headers, proxies=tor_proxy)
+    response = requests.get(url, headers=headers, proxies=tor_proxy, timeout=10)
     return response
