@@ -6,8 +6,6 @@ from requests.exceptions import Timeout
 
 from src.tor_requests import tor_get
 
-onion_pattern = '((?:https?://)?\\w+\\.onion)'
-
 url_list = []
 
 def crawl(url, result_file_path):
@@ -16,7 +14,7 @@ def crawl(url, result_file_path):
     if response.status_code == 200:
         print('Success')
         content = response.text
-        all_links = re.findall(onion_pattern, content, flags=re.MULTILINE)
+        all_links = get_onion_links(content)
         print('{} links found on first crawl, recursing'.format(len(all_links)))
         for link in all_links:
             if not link.startswith('http'):
@@ -26,14 +24,21 @@ def crawl(url, result_file_path):
             try:
                 child_response = tor_get(link)
                 print('Response: {}'.format(child_response.status_code))
+
+                child_content = child_response.text
+                if child_content:
+                    child_links = get_onion_links(child_content)
+                    print('Found {} child links'.format(len(child_links)))
+
                 if child_response.status_code == 200:
-                    child_content = child_response.text
 
                     page = BeautifulSoup(child_content, 'html.parser')
+
                     title = page.title.string
                     if not title:
-                        title = 'Unknown'
+                        title = 'Unknown title'
                     else:
+                        title = title.replace('\n', '\\n')
                         if ',' in title:
                             title = '"{}"'.format(title)
                     
@@ -41,6 +46,8 @@ def crawl(url, result_file_path):
 
                     with open(result_file_path, 'a') as result_file:
                         result_file.write('{},{}\n'.format(title, link))
+                else:
+                    print('{}: {} response status'.format(link, child_response.status_code))
             except (ConnectionError, Timeout):
                 print('{} timeout'.format(link))
 
@@ -48,3 +55,6 @@ def crawl(url, result_file_path):
         print('{} did not respond as expected'.format(url))
 
 
+def get_onion_links(html):
+    onion_pattern = '((?:https?://)?\\w+\\.onion)'
+    return re.findall(onion_pattern, html, flags=re.MULTILINE)
