@@ -1,17 +1,20 @@
 import re
+import sys
+import time
 
 from queue import Queue
 from threading import Event, Lock, Thread
 
 from bs4 import BeautifulSoup
-from requests.exceptions import Timeout
+from requests.exceptions import Timeout, SSLError
 
 from src.tor_requests import tor_get
 
 processing_links = Queue()
 all_known_links = []
 
-MAX_THREADS = 10
+MAX_THREADS = 20
+TIME_BETWEEN_REQUESTS = 5000
 current_threads = 0
 
 list_lock = Lock()
@@ -22,9 +25,15 @@ offline_lock = Lock()
 thread_control = Event()
 thread_control.set()
 
+thread_throttle = Event()
+thread_throttle.set()
+
+running = True
+
 
 def crawl(url, result_folder_path):
     global current_threads
+    global running
 
     online_file_path = result_folder_path + 'online.csv'
     offline_file_path = result_folder_path + 'offline.csv'
@@ -32,6 +41,8 @@ def crawl(url, result_folder_path):
     load_known_links(result_folder_path)
 
     print('Using a limit of {} threads'.format(MAX_THREADS))
+    print('The interval between each request is {} milliseconds'.format(
+        TIME_BETWEEN_REQUESTS))
 
     try:
         response = tor_get(url)
@@ -50,6 +61,8 @@ def crawl(url, result_folder_path):
         print('Could not scrape {}'.format(url))
         return
 
+    throttler = Thread(target=thread_pulse)
+    throttler.start()
     threads = []
     while not processing_links.empty():
         while not processing_links.empty():
@@ -57,6 +70,7 @@ def crawl(url, result_folder_path):
             link = processing_links.get()
             list_lock.release()
 
+            thread_throttle.wait()
             if current_threads >= MAX_THREADS:
                 thread_control.clear()
             thread_control.wait()
@@ -65,8 +79,10 @@ def crawl(url, result_folder_path):
             current_threads += 1
             count_lock.release()
 
-            thread = Thread(target=scrape, args=(link, online_file_path, offline_file_path))
+            thread = Thread(target=scrape, args=(
+                link, online_file_path, offline_file_path))
             threads.append(thread)
+            thread_throttle.clear()
             thread.start()
             #scrape(link, online_file_path, offline_file_path)
 
@@ -75,13 +91,17 @@ def crawl(url, result_folder_path):
 
         processing_links.join()
 
+    running = False
+    throttler.join()
+
 
 def scrape(link, online_file_path, offline_file_path):
     global current_threads
     if not link.startswith('http'):
         link = 'http://' + link
 
-    print('Scraping {}'.format(link))
+    print('Scraping {}. Current threads: {} / {}. Links in queue: {}'.format(link,
+          current_threads, MAX_THREADS, processing_links.qsize()))
     try:
         response = tor_get(link)
 
@@ -103,7 +123,12 @@ def scrape(link, online_file_path, offline_file_path):
                 len(new_links), discovered, link))
 
             page = BeautifulSoup(content, 'html.parser')
-            title = get_title(page.title.string)
+
+            if page.title:
+                title = page.title.string
+            else:
+                title = None
+            title = get_title(title)
         else:
             print('{}: {} response status'.format(
                 link, response.status_code))
@@ -115,12 +140,18 @@ def scrape(link, online_file_path, offline_file_path):
 
     except (ConnectionError, Timeout):
         print('{} timed out'.format(link))
-        status_code = None
-        title = 'Offline'
         offline_lock.acquire()
         with open(offline_file_path, 'a') as result_file:
             result_file.write('{}\n'.format(link))
         offline_lock.release()
+    except SSLError:
+        print('{} has invalid SSL certificate'.format(link))
+        status_code = 0
+        title = 'Invalid SSL certificate'
+        online_lock.acquire()
+        with open(online_file_path, 'a') as result_file:
+            result_file.write('{}\n'.format(link))
+        online_lock.release()
 
     list_lock.acquire()
     processing_links.task_done()
@@ -147,19 +178,47 @@ def get_onion_links(html):
 
 
 def load_known_links(result_folder_path):
-    print('Loading known links')
     online_file_path = result_folder_path + 'online.csv'
     offline_file_path = result_folder_path + 'offline.csv'
 
+    total_online = 0
+    total_offline = 0
+
+    print('Loading known links')
+
     with open(online_file_path, 'r') as online_file:
         all_lines = online_file.readlines()[1:]
-        for line in all_lines:
-            url = line.split(',')[1]
+        total_online = len(all_lines)
+        invalid = []
+        for i, line in enumerate(all_lines):
+            try:
+                url = line.split(',')[1]
+            except IndexError:
+                invalid.append((i + 2, line.strip()))
             all_known_links.append(url)
+
+    if invalid:
+        plural = 's' if len(invalid) > 1 else ''
+        print('[ERROR] Found {} invalid line{}:'.format(len(invalid), plural))
+
+        for line_number, line in invalid:
+            print('Line {}: {}'.format(line_number, line))
+
+        sys.exit(10)
 
     with open(offline_file_path, 'r') as offline_file:
         all_lines = offline_file.readlines()[1:]
+        total_offline = len(all_lines)
         for line in all_lines:
             all_known_links.append(line)
 
-    print('Found {} known links'.format(len(all_known_links)))
+    print('Found {} known links ({} online, {} offline)'.format(
+        len(all_known_links), total_online, total_offline))
+
+
+def thread_pulse():
+    global running
+    interval = TIME_BETWEEN_REQUESTS / 1000
+    while running:
+        thread_throttle.set()
+        time.sleep(interval)
