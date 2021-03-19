@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 import time
@@ -39,60 +40,71 @@ def crawl(url, result_folder_path):
     offline_file_path = result_folder_path + 'offline.csv'
 
     load_known_links(result_folder_path)
+    load_pending_links(result_folder_path)
 
     print('Using a limit of {} threads'.format(MAX_THREADS))
     print('The interval between each request is {} milliseconds'.format(
         TIME_BETWEEN_REQUESTS))
 
     try:
-        response = tor_get(url)
-    except (ConnectionError, Timeout):
-        print('Failed to connect to {}'.format(url))
-        return
+        try:
+            response = tor_get(url)
+        except (ConnectionError, Timeout):
+            print('Failed to connect to {}'.format(url))
+            return
 
-    content = response.text
-    if content:
-        all_links = [link for link in get_onion_links(
-            content) if link not in all_known_links]
-        for link in all_links:
-            processing_links.put(link)
-            all_known_links.append(link)
-    else:
-        print('Could not scrape {}'.format(url))
-        return
+        content = response.text
+        if content:
+            all_links = [link for link in get_onion_links(
+                content) if link not in all_known_links]
+            for link in all_links:
+                processing_links.put(link)
+                all_known_links.append(link)
+        else:
+            print('Could not scrape {}'.format(url))
+            return
 
-    throttler = Thread(target=thread_pulse)
-    throttler.start()
-    threads = []
-    while not processing_links.empty():
+        throttler = Thread(target=thread_pulse)
+        throttler.start()
+        threads = []
         while not processing_links.empty():
-            list_lock.acquire()
-            link = processing_links.get()
-            list_lock.release()
+            while not processing_links.empty():
+                list_lock.acquire()
+                link = processing_links.get()
+                list_lock.release()
 
-            thread_throttle.wait()
-            if current_threads >= MAX_THREADS:
-                thread_control.clear()
-            thread_control.wait()
+                thread_throttle.wait()
+                if current_threads >= MAX_THREADS:
+                    thread_control.clear()
+                thread_control.wait()
 
-            count_lock.acquire()
-            current_threads += 1
-            count_lock.release()
+                count_lock.acquire()
+                current_threads += 1
+                count_lock.release()
 
-            thread = Thread(target=scrape, args=(
-                link, online_file_path, offline_file_path))
-            threads.append(thread)
-            thread_throttle.clear()
-            thread.start()
-            #scrape(link, online_file_path, offline_file_path)
+                thread = Thread(target=scrape, args=(
+                    link, online_file_path, offline_file_path))
+                threads.append(thread)
+                thread_throttle.clear()
+                thread.start()
 
-        for thread in threads:
-            thread.join()
+            for thread in threads:
+                thread.join()
 
-        processing_links.join()
+            processing_links.join()
 
-    running = False
-    throttler.join()
+        running = False
+        throttler.join()
+    except KeyboardInterrupt:
+        running = False
+        print('Saving progress, please wait for graceful stop.')
+        pending_file_path = result_folder_path + "pending.dat"
+
+        with open(pending_file_path, 'w') as pending_file:
+            content = '\n'.join(list(processing_links.queue))
+            pending_file.write(content)
+
+        print('Progress saved, wait until execution ends so no links are skipped.')
 
 
 def scrape(link, online_file_path, offline_file_path):
@@ -119,8 +131,9 @@ def scrape(link, online_file_path, offline_file_path):
                     processing_links.put(child_link)
                     list_lock.release()
 
-            print('Found {} child links ({} new) in {}'.format(
-                len(new_links), discovered, link))
+            if running:
+                print('Result: {} has {} child links ({} new)'.format(
+                    link, len(new_links), discovered))
 
             page = BeautifulSoup(content, 'html.parser')
 
@@ -129,29 +142,38 @@ def scrape(link, online_file_path, offline_file_path):
             else:
                 title = None
             title = get_title(title)
+
+            online_lock.acquire()
+            with open(online_file_path, 'a') as result_file:
+                result_file.write('{},{},{}\n'.format(
+                    title, link, status_code))
+            online_lock.release()
         else:
-            print('{}: {} response status'.format(
+            print('[WARNING] Unexpected status code {}: {} response status'.format(
                 link, response.status_code))
-
-        online_lock.acquire()
-        with open(online_file_path, 'a') as result_file:
-            result_file.write('{},{},{}\n'.format(title, link, status_code))
-        online_lock.release()
-
     except (ConnectionError, Timeout):
-        print('{} timed out'.format(link))
+        print('Result: {} timed out'.format(link))
         offline_lock.acquire()
         with open(offline_file_path, 'a') as result_file:
             result_file.write('{}\n'.format(link))
         offline_lock.release()
     except SSLError:
-        print('{} has invalid SSL certificate'.format(link))
+        print('Result: {} has invalid SSL certificate'.format(link))
         status_code = 0
         title = 'Invalid SSL certificate'
         online_lock.acquire()
         with open(online_file_path, 'a') as result_file:
             result_file.write('{}\n'.format(link))
         online_lock.release()
+    except Exception as e:
+        error_file_path = 'errors.txt'
+        if not os.path.exists(error_file_path):
+            with open(error_file_path, 'w'):
+                pass
+        with open(error_file_path, 'a') as error_file:
+            error_file.write(link + '\n')
+            error_file.write(str(e) + '\n')
+            error_file.write(status_code)
 
     list_lock.acquire()
     processing_links.task_done()
@@ -214,6 +236,21 @@ def load_known_links(result_folder_path):
 
     print('Found {} known links ({} online, {} offline)'.format(
         len(all_known_links), total_online, total_offline))
+
+
+def load_pending_links(result_folder_path):
+    pending_file_path = result_folder_path + 'pending.dat'
+
+    if os.path.exists(pending_file_path):
+        print('Loading pending links')
+        with open(pending_file_path, 'r') as pending_file:
+            links = [link.strip() for link in pending_file.readlines()
+                     if link not in all_known_links]
+
+        for line in links:
+            processing_links.put(line)
+
+        print('Restored {} pending links'.format(len(links)))
 
 
 def thread_pulse():
