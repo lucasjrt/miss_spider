@@ -2,8 +2,36 @@ import os
 import sys
 
 from src.crawler import crawl
+from src.crawler import load_known_links, load_pending_links
 
 output_directory = './results/'
+
+def sanitize_pending(results_path):
+    if results_path[-1] != '/':
+        results_path += '/'
+
+    pending_path = '{}pending.dat'.format(results_path)
+
+    if not os.path.exists(pending_path):
+        return
+
+    print('Sanitizing pending links')
+    pending_links = load_pending_links(results_path, read_only=True)
+    known_links = load_known_links(results_path, read_only=True)
+
+    print('Total pending before sanitizing: {}'.format(len(pending_links)))
+
+    pending_links = list(dict.fromkeys(pending_links))
+
+    for link in list(pending_links):
+        if link in known_links:
+            pending_links.remove(link)
+
+    with open(pending_path, 'w') as pending:
+        pending.writelines('\n'.join(pending_links))
+
+    print('Total pending after sanitizing: {}'.format(len(pending_links)))
+
 
 if __name__ == "__main__":
     initial_targets = []
@@ -18,6 +46,8 @@ if __name__ == "__main__":
         for target in sys.argv[1:]:
             initial_targets.append(target.strip())
 
+    sanitize_pending(output_directory)
+
     print("Targeting the following URL's:")
     for target in initial_targets:
         print('  - {}'.format(target))
@@ -26,14 +56,11 @@ if __name__ == "__main__":
         os.makedirs(output_directory)
 
     for target in initial_targets:
-        parsed_target = target.replace('/', '_')
-        result_directory_path = output_directory + '{}/'.format(parsed_target)
+        online_file_path = output_directory + 'online.csv'
+        offline_file_path = output_directory + 'offline.csv'
 
-        online_file_path = result_directory_path + 'online.csv'
-        offline_file_path = result_directory_path + 'offline.csv'
-
-        if not os.path.exists(result_directory_path):
-            os.makedirs(result_directory_path)
+        if not os.path.exists(output_directory):
+            os.makedirs(output_directory)
 
         if not os.path.exists(online_file_path):
             with open(online_file_path, 'w') as online_file:
@@ -43,4 +70,4 @@ if __name__ == "__main__":
             with open(offline_file_path, 'w') as offline_file:
                 offline_file.write('URL\n')
 
-        crawl(target, result_directory_path)
+        crawl(target, output_directory)

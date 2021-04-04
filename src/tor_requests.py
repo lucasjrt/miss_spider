@@ -7,7 +7,7 @@ from fake_useragent import UserAgent
 from stem import Signal
 from stem.control import Controller
 
-TIMEOUT = 60
+TIMEOUT = 600
 
 try:
     TOR_PASS = os.environ['TOR_PASS']
