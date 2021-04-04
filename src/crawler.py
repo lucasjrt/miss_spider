@@ -15,7 +15,7 @@ from src.tor_requests import tor_get
 processing_links = Queue()
 all_known_links = []
 
-MAX_THREADS = 5
+MAX_THREADS = 50
 TIME_BETWEEN_REQUESTS = 5000
 current_threads = 0
 
@@ -59,7 +59,7 @@ def crawl(url, result_folder_path):
             print('Failed to connect to {}. {}'.format(url, e))
             if not os.path.exists(error_file_path):
                 with open(error_file_path, 'w') as error_file:
-                    error_file.write('URL,Error')
+                    error_file.write('URL,Error\n')
 
             with open(error_file_path, 'a') as error_file:
                 formatted_error = str(e).replace('\n', '\\n')
@@ -72,9 +72,15 @@ def crawl(url, result_folder_path):
         if content:
             all_links = [link for link in get_onion_links(
                 content) if link not in all_known_links]
+            all_links = get_onion_links(content)
+
             for link in all_links:
-                processing_links.put(link)
-                all_known_links.append(link)
+                if not link.startswith('http'):
+                    link = 'http://' + link
+
+                if link not in all_known_links:
+                    processing_links.put(link)
+                    all_known_links.append(link)
         else:
             print('Could not scrape {}'.format(url))
             return
@@ -143,6 +149,9 @@ def scrape(link, result_folder_path):
             discovered_links = get_onion_links(content)
             new_links = 0
             for child_link in discovered_links:
+                if not child_link.startswith('http'):
+                    child_link = 'http://' + child_link
+
                 if child_link not in all_known_links:
                     new_links += 1
                     list_lock.acquire()
@@ -195,7 +204,7 @@ def scrape(link, result_folder_path):
         error_lock.acquire()
         if not os.path.exists(error_file_path):
             with open(error_file_path, 'w') as error_file:
-                error_file.write('URL,Error')
+                error_file.write('URL,Error\n')
 
         with open(error_file_path, 'a') as error_file:
             formatted_error = str(e).replace('\n', '\\n')
@@ -208,7 +217,7 @@ def scrape(link, result_folder_path):
         error_lock.acquire()
         if not os.path.exists(error_file_path):
             with open(error_file_path, 'w') as error_file:
-                error_file.write('URL,Error')
+                error_file.write('URL,Error\n')
 
         with open(error_file_path, 'a') as error_file:
             formatted_error = str(e).replace('\n', '\\n')
@@ -260,6 +269,8 @@ def load_known_links(result_folder_path, read_only=False):
         for i, line in enumerate(all_lines):
             try:
                 url = line.split(',')[1]
+                if not url.startswith('http'):
+                    url = 'http://' + url
                 known_links.append(url)
             except IndexError:
                 invalid.append((i + 2, line.strip()))
@@ -277,6 +288,8 @@ def load_known_links(result_folder_path, read_only=False):
         all_lines = offline_file.readlines()[1:]
         total_offline = len(all_lines)
         for line in all_lines:
+            if not line.startswith('http'):
+                line = 'http://' + line
             known_links.append(line)
 
     if read_only:
@@ -296,11 +309,14 @@ def load_pending_links(result_folder_path, read_only=False):
             print('Loading pending links')
 
         with open(pending_file_path, 'r') as pending_file:
-            links = [link.strip() for link in pending_file.readlines()
-                     if link not in all_known_links]
+            all_links = pending_file.readlines()
+            for link in all_links:
+                link = link.strip()
+                if not link.startswith('http'):
+                    link = 'http://' + link
 
         if read_only:
-            return links
+            return all_links
 
         for line in links:
             processing_links.put(line)
