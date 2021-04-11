@@ -15,7 +15,7 @@ from src.tor_requests import tor_get
 processing_links = Queue()
 all_known_links = []
 
-MAX_THREADS = 50
+MAX_THREADS = 5
 TIME_BETWEEN_REQUESTS = 5000
 current_threads = 0
 
@@ -308,21 +308,23 @@ def load_pending_links(result_folder_path, read_only=False):
         if not read_only:
             print('Loading pending links')
 
+        all_links = []
         with open(pending_file_path, 'r') as pending_file:
-            all_links = pending_file.readlines()
-            for link in all_links:
+            lines = pending_file.readlines()
+            for link in lines:
                 link = link.strip()
                 if not link.startswith('http'):
                     link = 'http://' + link
+                all_links.append(link)
 
         if read_only:
             return all_links
 
-        for line in links:
+        for line in all_links:
             processing_links.put(line)
             all_known_links.append(line)
 
-        print('Restored {} pending links'.format(len(links)))
+        print('Restored {} pending links'.format(len(all_links)))
 
 
 def thread_pulse():

@@ -61,7 +61,7 @@ def tor_get(url: str):
                 except AttributeError as e1:
                     raise e
             except ConnError as e:
-                print('!![WARNING] Unknown exception code. Exception: {}'.format(e))
+                print('[WARNING] Exception: {}'.format(e))
                 raise e
         except Exception as e:
             print('[WARNING] Unexpected generic exception')
