@@ -40,7 +40,7 @@ if __name__ == "__main__":
             for target in sys.stdin:
                 initial_targets.append(target.strip())
         else:
-            print('Usage: python app.py [URL]')
+            print('Usage: python miss_spider.py URL [URL...]')
             sys.exit(1)
     else:
         for target in sys.argv[1:]:
