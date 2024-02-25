@@ -49,8 +49,11 @@ The following command will start Miss Spider and use the given URL as the starti
 miss_spider http://example.com http://example2.com
 ```
 
-Also it supports piping, this allows you to read from files:
+Also it supports piping, this allows you to read from files while still reading from args:
 
 ```bash
-cat urls.txt | miss_spider
+cat urls.txt | miss_spider http://example.com
 ```
+
+
+> If you're looking for the python version of Miss Spider, you can find it in the [python branch](https://github.com/lucasjrt/miss_spider/tree/python).
