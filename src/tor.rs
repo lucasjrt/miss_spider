@@ -1,27 +1,58 @@
-use crate::Error;
+use crate::{url::ensure_http_scheme, Error};
 
-pub async fn tor_request(address: &str) -> Result<reqwest::Response, Error> {
-    let proxy_password = std::env::var("TOR_PROXY_PASSWORD").unwrap_or("".to_string());
-    let proxy_address = std::env::var("TOR_PROXY_ADDRESS").unwrap_or_else(|_| {
-        if proxy_password.is_empty() {
-            panic!("TOR_PROXY_PASSWORD must be set if TOR_PROXY_ADDRESS is not set");
-        }
-        format!("socks5h://username:{}@127.0.0.1:9050", proxy_password).to_string()
-    });
+const DEFAULT_TOR_PROXY_PREFIX: &str = "socks5h://username:";
+const DEFAULT_TOR_PROXY_SUFFIX: &str = "@127.0.0.1:9050";
+const TOR_PROXY_ADDRESS_ENV: &str = "TOR_PROXY_ADDRESS";
+const TOR_PROXY_PASSWORD_ENV: &str = "TOR_PROXY_PASSWORD";
+
+pub fn tor_client_from_env() -> Result<reqwest::Client, Error> {
+    let proxy_address = tor_proxy_address_from_env()?;
     let proxy = reqwest::Proxy::all(proxy_address)?;
-    let client = reqwest::Client::builder().proxy(proxy).build()?;
-    tor_request_with_client(address, &client).await
+    Ok(reqwest::Client::builder().proxy(proxy).build()?)
 }
 
 pub async fn tor_request_with_client(
     address: &str,
     client: &reqwest::Client,
 ) -> Result<reqwest::Response, Error> {
-    let address = if address.starts_with("http") {
-        address.to_string()
-    } else {
-        format!("http://{}", address)
-    };
-    let response = client.get(address).send().await?;
-    Ok(response)
+    Ok(client
+        .get(ensure_http_scheme(address))
+        .send()
+        .await?
+        .error_for_status()?)
+}
+
+fn tor_proxy_address_from_env() -> Result<String, Error> {
+    if let Ok(proxy_address) = std::env::var(TOR_PROXY_ADDRESS_ENV) {
+        if proxy_address.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{TOR_PROXY_ADDRESS_ENV} must not be empty"),
+            )
+            .into());
+        }
+
+        return Ok(proxy_address);
+    }
+
+    let proxy_password = std::env::var(TOR_PROXY_PASSWORD_ENV).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{TOR_PROXY_PASSWORD_ENV} must be set if {TOR_PROXY_ADDRESS_ENV} is not set"),
+        )
+    })?;
+
+    if proxy_password.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{TOR_PROXY_PASSWORD_ENV} must not be empty if {TOR_PROXY_ADDRESS_ENV} is not set"
+            ),
+        )
+        .into());
+    }
+
+    Ok(format!(
+        "{DEFAULT_TOR_PROXY_PREFIX}{proxy_password}{DEFAULT_TOR_PROXY_SUFFIX}"
+    ))
 }

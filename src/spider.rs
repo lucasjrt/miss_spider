@@ -1,69 +1,131 @@
-use crate::tor::tor_request_with_client;
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
+use crate::tor::{tor_client_from_env, tor_request_with_client};
+use crate::url::ensure_http_scheme;
 use regex::Regex;
 
 use crate::Error;
 
+const ONION_LINK_PATTERN: &str = r#"((?:https?://)?([^\.'">]+\.onion)([^\s'"<;]*))"#;
+static ONION_LINK_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(ONION_LINK_PATTERN).expect("valid onion link regex"));
+
 struct Spider {
     tor_client: reqwest::Client,
     to_visit: Vec<String>,
+    queued: HashSet<String>,
+    visited_set: HashSet<String>,
     visited: Vec<String>,
+}
+
+pub async fn crawl(address: &str) -> Result<Vec<String>, Error> {
+    let mut spider = Spider::new()?;
+    spider.crawl(address).await
 }
 
 impl Spider {
     pub fn new() -> Result<Self, Error> {
-        let proxy_password = std::env::var("TOR_PROXY_PASSWORD").unwrap_or("".to_string());
-        let proxy_address = std::env::var("TOR_PROXY_ADDRESS").unwrap_or_else(|_| {
-            if proxy_password.is_empty() {
-                panic!("TOR_PROXY_PASSWORD must be set if TOR_PROXY_ADDRESS is not set");
-            }
-            format!("socks5h://username:{}@127.0.0.1:9050", proxy_password).to_string()
-        });
-        let proxy = reqwest::Proxy::all(proxy_address)?;
-        let client = reqwest::Client::builder().proxy(proxy).build()?;
-        Ok(Self {
-            tor_client: client,
-            to_visit: Vec::new(),
-            visited: Vec::new(),
-        })
+        Ok(Self::with_client(tor_client_from_env()?))
     }
 
-    pub async fn crawl(&mut self, address: &str) -> Result<Vec<String>, Box<Error>> {
-        self.to_visit.push(address.to_string());
+    fn with_client(tor_client: reqwest::Client) -> Self {
+        Self {
+            tor_client,
+            to_visit: Vec::new(),
+            queued: HashSet::new(),
+            visited_set: HashSet::new(),
+            visited: Vec::new(),
+        }
+    }
+
+    pub async fn crawl(&mut self, address: &str) -> Result<Vec<String>, Error> {
+        self.queue(address.to_string());
         while !self.to_visit.is_empty() {
             self.crawl_next().await?;
         }
         Ok(self.visited.clone())
     }
 
-    pub async fn crawl_next(&mut self) -> Result<(), Box<Error>> {
-        if let Some(next) = self.to_visit.pop() {
-            let response = tor_request_with_client(&next, &self.tor_client).await?;
-            let body = response
-                .text()
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-            let count = self.scrape(body).await?;
-            println!("Scraped {} links from {}", count, next);
-        } else {
-            println!("No more links to visit");
+    pub async fn crawl_next(&mut self) -> Result<(), Error> {
+        let Some(next) = self.to_visit.pop() else {
+            return Ok(());
+        };
+
+        self.queued.remove(&next);
+        if self.visited_set.contains(&next) {
+            return Ok(());
         }
+
+        let response = tor_request_with_client(&next, &self.tor_client).await?;
+        let body = response.text().await?;
+
+        self.visited_set.insert(next.clone());
+        self.visited.push(next.clone());
+
+        let count = self.scrape(&body);
+        eprintln!("Scraped {} links from {}", count, next);
         Ok(())
     }
 
-    pub async fn scrape(&mut self, content: String) -> Result<usize, Box<Error>> {
-        let re = Regex::new(r#"((?:https?://)?([^\.'">]+\.onion)([^\s'"<;]+))"#).unwrap();
-        let captures = re.captures_iter(&content);
+    pub fn scrape(&mut self, content: &str) -> usize {
         let mut count = 0;
-        for cap in captures {
-            let mut capture = cap[1].to_string();
-            if !capture.starts_with("http") {
-                capture = format!("http://{}", capture);
-            }
-            if !self.visited.contains(&capture) && !self.to_visit.contains(&capture) {
+        for cap in ONION_LINK_REGEX.captures_iter(content) {
+            let capture = ensure_http_scheme(&cap[1]);
+            if self.queue(capture) {
                 count += 1;
-                self.to_visit.push(capture);
             }
         }
-        Ok(count)
+        count
+    }
+
+    fn queue(&mut self, address: String) -> bool {
+        if self.visited_set.contains(&address) || !self.queued.insert(address.clone()) {
+            return false;
+        }
+
+        self.to_visit.push(address);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrape_queues_unique_normalized_onion_links() {
+        let client = reqwest::Client::new();
+        let mut spider = Spider::with_client(client);
+
+        let count = spider.scrape(
+            r#"
+            <a href="firstaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion/path">first</a>
+            <a href="http://firstaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion/path">duplicate</a>
+            <a href="https://seconddddddddddddddddddddddddddd.onion">second</a>
+            "#,
+        );
+
+        assert_eq!(count, 2);
+        assert_eq!(
+            spider.to_visit,
+            vec![
+                "http://firstaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion/path",
+                "https://seconddddddddddddddddddddddddddd.onion"
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_ignores_already_visited_urls() {
+        let client = reqwest::Client::new();
+        let mut spider = Spider::with_client(client);
+
+        spider
+            .visited_set
+            .insert("http://visited.onion".to_string());
+
+        assert!(!spider.queue("http://visited.onion".to_string()));
+        assert!(spider.to_visit.is_empty());
     }
 }
